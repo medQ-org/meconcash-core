@@ -132,6 +132,277 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, Object& entry)
     }
 }
 
+Value searchrawtransactions(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 4)
+        throw runtime_error("searchrawtransactions <address> [verbose=1] [skip=0] [count=100]\n");
+
+    if (!fAddrIndex)
+        throw JSONRPCError(RPC_MISC_ERROR, "Address index not enabled");
+
+    CBitcoinAddress address(params[0].get_str());
+    if (!address.IsValid())
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Meconcash address");
+    CTxDestination dest = address.Get();
+
+    std::set<CExtDiskTxPos> setpos;
+    if (!FindTransactionsByDestination(dest, setpos))
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Cannot search for address");
+
+    int nSkip = 0;
+    int nCount = 100;
+    bool fVerbose = true;
+    if (params.size() > 1)
+        fVerbose = (params[1].get_int() != 0);
+    if (params.size() > 2)
+        nSkip = params[2].get_int();
+    if (params.size() > 3)
+        nCount = params[3].get_int();
+
+    if (nSkip < 0)
+        nSkip = 0;
+    if (nCount < 0)
+        nCount = 0;
+
+    Array result;
+    if (setpos.size() > 0 && setpos.size() > nSkip) {
+        std::set<CExtDiskTxPos>::const_iterator it = setpos.end();
+        while (it != setpos.begin() && it == setpos.end()) it--;
+        while (it != setpos.begin() && nSkip--) it--;
+
+        do {
+            CTransaction tx;
+            uint256 hashBlock;
+            if (!ReadTransaction(tx, *it, hashBlock))
+                throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Cannot read transaction from disk");
+            CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
+            ssTx << tx;
+            string strHex = HexStr(ssTx.begin(), ssTx.end());
+            if (fVerbose) {
+                Object object;
+                TxToJSON(tx, hashBlock, object);
+                object.push_back(Pair("hex", strHex));
+                result.push_back(object);
+            } else {
+                result.push_back(strHex);
+            }
+            if (it == setpos.begin()) break;
+            it--;
+        } while (nCount--);
+    }
+
+    return result;
+}
+
+Value listallunspent(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 5)
+        throw runtime_error(
+            "listallunspent \"address\" ( verbose minconf maxconf maxreqsigs )\n"
+
+            "\nReturns an array of confirmed, unspent transaction outputs with between"
+            " minconf and maxconf (inclusive) confirmations, spendable by the provided"
+            " address, whereby maximal maxreqsigs signatures are required to redeem the"
+            " output.\n"
+
+            "\nArguments:\n"
+            "1. address          (string, required) The Meconcash address\n"
+            "2. verbose          (numeric, optional, default=0) If 0, exclude reqSigs, addresses, scriptPubKey (asm, hex), blockhash, blocktime, blockheight\n"
+            "3. minconf          (numeric, optional, default=1) The minimum confirmations to filter.\n"
+            "4. maxconf          (numeric, optional, default=9999999) The maximum confirmations to filter\n"
+            "5. maxreqsigs       (numeric, optional, default=1) The number of signatures required to spend the output\n"
+        );
+
+    RPCTypeCheck(params, list_of(str_type)(int_type)(int_type)(int_type)(int_type));
+
+    if (!fAddrIndex)
+        throw JSONRPCError(RPC_MISC_ERROR, "Address index not enabled");
+
+    CBitcoinAddress address(params[0].get_str());
+    if (!address.IsValid())
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Meconcash address");
+    CTxDestination dest = address.Get();
+
+    std::set<CExtDiskTxPos> setpos;
+    if (!FindTransactionsByDestination(dest, setpos))
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Cannot search for address");
+
+    bool fVerbose = false;
+    if (params.size() > 1)
+        fVerbose = (params[1].get_int() != 0);
+
+    int nMinDepth = 1;
+    if (params.size() > 2)
+        nMinDepth = params[2].get_int();
+
+    int nMaxDepth = 9999999;
+    if (params.size() > 3)
+        nMaxDepth = params[3].get_int();
+
+    int nMaxReqSigs = 1;
+    if (params.size() > 4)
+        nMaxReqSigs = params[4].get_int();
+
+    Array results;
+    std::set<CExtDiskTxPos>::const_iterator it = setpos.begin();
+    while (it != setpos.end()) {
+        CTransaction tx;
+        uint256 hashBlock;
+        if (!ReadTransaction(tx, *it, hashBlock))
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Cannot read transaction from disk");
+
+        CCoins coins;
+        pcoinsTip->GetCoins(tx.GetHash(), coins);
+        for (unsigned int n = 0; n < tx.vout.size(); n++) {
+            const CTxOut& txout = tx.vout[n];
+            if (!(coins.IsAvailable(n) && txout.nValue > 0))
+                continue;
+
+            txnouttype type;
+            vector<CTxDestination> addresses;
+            int nRequired;
+            if (!ExtractDestinations(txout.scriptPubKey, type, addresses, nRequired))
+                continue;
+            if (nMaxReqSigs < nRequired)
+                continue;
+            if (std::find(addresses.begin(), addresses.end(), dest) == addresses.end())
+                continue;
+
+            int nDepth = 0;
+            int nHeight = 0;
+            int64_t nTime = 0;
+            
+            map<uint256, CBlockIndex*>::iterator mi = mapBlockIndex.find(hashBlock);
+            if (mi != mapBlockIndex.end() && (*mi).second) {
+                CBlockIndex* pindex = (*mi).second;
+                if (pindex->IsInMainChain()) {
+                    nHeight = pindex->nHeight;
+                    nDepth = nBestHeight - nHeight + 1;
+                    nTime = pindex->GetBlockTime();
+                }
+            }
+
+            if (nDepth < nMinDepth || nDepth > nMaxDepth)
+                continue;
+
+            Object entry;
+            entry.push_back(Pair("txid", tx.GetHash().GetHex()));
+            entry.push_back(Pair("vout", (int64_t)n));
+            entry.push_back(Pair("amount", ValueFromAmount(txout.nValue)));
+            entry.push_back(Pair("type", GetTxnOutputType(type)));
+
+            if (fVerbose) {
+                entry.push_back(Pair("reqSigs", nRequired));
+                Array a;
+                BOOST_FOREACH(const CTxDestination& addrinner, addresses)
+                    a.push_back(CBitcoinAddress(addrinner).ToString());
+                entry.push_back(Pair("addresses", a));
+
+                Object pkobj;
+                const CScript& pk = txout.scriptPubKey;
+                pkobj.push_back(Pair("asm", pk.ToString()));
+                pkobj.push_back(Pair("hex", HexStr(pk.begin(), pk.end())));
+                entry.push_back(Pair("scriptPubKey", pkobj));
+
+                entry.push_back(Pair("blockhash", hashBlock.GetHex()));
+                entry.push_back(Pair("blocktime", nTime));
+                entry.push_back(Pair("blockheight", nHeight));
+            }
+
+            entry.push_back(Pair("confirmations", nDepth));
+            results.push_back(entry);
+        }
+        it++;
+    }
+
+    return results;
+}
+
+Value getallbalance(const Array& params, bool fHelp)
+{
+    if (fHelp || params.size() < 1 || params.size() > 3)
+        throw runtime_error(
+            "getallbalance \"address\" ( minconf maxreqsigs )\n"
+
+            "\nReturns the sum of confirmed, spendable transaction outputs by address"
+            " with at least minconf confirmations, whereby maximal maxreqsigs signatures"
+            " are allowed to be required to redeem an output.\n"
+
+            "\nArguments:\n"
+            "1. address          (string, required) The Meconcash address\n"
+            "2. minconf          (numeric, optional, default=1) The minimum confirmations to filter\n"
+            "3. maxreqsigs       (numeric, optional, default=1) The number of signatures required to spend an output\n"
+        );
+    
+    RPCTypeCheck(params, list_of(str_type)(int_type)(int_type));
+
+    LOCK(cs_main);
+
+    if (!fAddrIndex)
+        throw JSONRPCError(RPC_MISC_ERROR, "Address index not enabled");
+
+    CBitcoinAddress address(params[0].get_str());
+    if (!address.IsValid())
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Bitcoin address");
+    CTxDestination dest = address.Get();
+
+    std::set<CExtDiskTxPos> setpos;
+    if (!FindTransactionsByDestination(dest, setpos))
+        throw JSONRPCError(RPC_DATABASE_ERROR, "Cannot search for address");
+
+    int nMinDepth = 1;
+    if (params.size() > 1)
+        nMinDepth = params[1].get_int();
+        
+    int nMaxReqSigs = 1;
+    if (params.size() > 2)
+        nMaxReqSigs = params[2].get_int();
+
+    int64_t nBalance = 0;
+    std::set<CExtDiskTxPos>::const_iterator it = setpos.begin();
+    while (it != setpos.end()) {
+        CTransaction tx;
+        uint256 hashBlock;
+        if (!ReadTransaction(tx, *it, hashBlock))
+            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Cannot read transaction from disk");
+
+        CCoins coins;
+        pcoinsTip->GetCoins(tx.GetHash(), coins);
+        for (unsigned int i = 0; i < tx.vout.size(); i++) {
+            const CTxOut& txout = tx.vout[i];
+            if (!(coins.IsAvailable(i) && txout.nValue > 0))
+                continue;
+
+            txnouttype type;
+            vector<CTxDestination> addresses;
+            int nRequired;
+            if (!ExtractDestinations(txout.scriptPubKey, type, addresses, nRequired))
+                continue;
+            if (nMaxReqSigs < nRequired)
+                continue;
+            if (std::find(addresses.begin(), addresses.end(), dest) == addresses.end())
+                continue;
+
+            int nDepth = 0;
+            map<uint256, CBlockIndex*>::iterator mi = mapBlockIndex.find(hashBlock);
+            if (mi != mapBlockIndex.end() && (*mi).second) {
+                CBlockIndex* pindex = (*mi).second;
+                if (pindex->IsInMainChain()) {
+                    nDepth = nBestHeight - pindex->nHeight + 1;
+                }
+            }
+
+            if (nDepth < nMinDepth)
+                continue;
+
+            nBalance += txout.nValue;
+        }
+        it++;
+    }
+
+    return ValueFromAmount(nBalance);
+}
+
 Value getrawtransaction(const Array& params, bool fHelp)
 {
     if (fHelp || params.size() < 1 || params.size() > 2)
