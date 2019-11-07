@@ -160,34 +160,37 @@ Value searchrawtransactions(const Array& params, bool fHelp)
         nCount = params[3].get_int();
 
     if (nSkip < 0)
-        nSkip += setpos.size();
-    if (nSkip < 0)
         nSkip = 0;
     if (nCount < 0)
         nCount = 0;
 
-    std::set<CExtDiskTxPos>::const_iterator it = setpos.begin();
-    while (it != setpos.end() && nSkip--) it++;
-
     Array result;
-    while (it != setpos.end() && nCount--) {
-        CTransaction tx;
-        uint256 hashBlock;
-        if (!ReadTransaction(tx, *it, hashBlock))
-            throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Cannot read transaction from disk");
-        CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
-        ssTx << tx;
-        string strHex = HexStr(ssTx.begin(), ssTx.end());
-        if (fVerbose) {
-            Object object;
-            TxToJSON(tx, hashBlock, object);
-            object.push_back(Pair("hex", strHex));
-            result.push_back(object);
-        } else {
-            result.push_back(strHex);
-        }
-        it++;
+    if (setpos.size() > 0 && setpos.size() > nSkip) {
+        std::set<CExtDiskTxPos>::const_iterator it = setpos.end();
+        while (it != setpos.begin() && it == setpos.end()) it--;
+        while (it != setpos.begin() && nSkip--) it--;
+
+        do {
+            CTransaction tx;
+            uint256 hashBlock;
+            if (!ReadTransaction(tx, *it, hashBlock))
+                throw JSONRPCError(RPC_DESERIALIZATION_ERROR, "Cannot read transaction from disk");
+            CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
+            ssTx << tx;
+            string strHex = HexStr(ssTx.begin(), ssTx.end());
+            if (fVerbose) {
+                Object object;
+                TxToJSON(tx, hashBlock, object);
+                object.push_back(Pair("hex", strHex));
+                result.push_back(object);
+            } else {
+                result.push_back(strHex);
+            }
+            if (it == setpos.begin()) break;
+            it--;
+        } while (nCount--);
     }
+
     return result;
 }
 
